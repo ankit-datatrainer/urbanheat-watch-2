@@ -3,7 +3,7 @@ import { useT } from "../lib/i18n";
 import { C, F } from "./ui/theme";
 
 /** The people who created UrbanHeat Watch, shown on the splash screen and in Profile. */
-export const CREATORS = ["Mary Katrina Xavier Mahendran", "Ethan Tan Yew Heung"];
+export const CREATORS = ["Mary Katrina Xavier Mahendran"];
 
 export default function Credits({ tone = "dark", style }: { tone?: "dark" | "light"; style?: StyleProp<ViewStyle> }) {
   const t = useT();
