@@ -1,0 +1,18 @@
+# systemd service that keeps the UrbanHeat Watch API running and restarts it after crashes or reboots.
+# Copy to /etc/systemd/system/uhw-api.service (see deploy/DEPLOY.md).
+
+[Unit]
+Description=UrbanHeat Watch API
+After=network.target
+
+[Service]
+Type=simple
+User=uhw
+WorkingDirectory=/opt/uhw/app/backend/api
+ExecStart=/usr/bin/npm start
+Restart=always
+RestartSec=5
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=multi-user.target

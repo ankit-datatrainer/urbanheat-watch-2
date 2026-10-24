@@ -112,6 +112,8 @@ export function buildApp(deps: AppDeps): FastifyInstance {
       redact: ["req.headers.authorization", "req.headers['x-worker-token']"],
     },
     bodyLimit: 16 * 1024,
+    // Behind Nginx on the VPS, read the visitor's IP from X-Forwarded-For so rate limits are per user.
+    trustProxy: process.env.TRUST_PROXY === "1",
   });
   const requests = new TtlCache<StoredRequest>(6 * 3600_000, 5000);
 
