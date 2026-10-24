@@ -29,6 +29,7 @@ ufw allow OpenSSH >/dev/null; ufw allow 'Nginx Full' >/dev/null; ufw --force ena
 echo "== 2/6 Getting the code =="
 id uhw >/dev/null 2>&1 || adduser --system --group --home /opt/uhw uhw
 mkdir -p /opt/uhw "$WEB"
+git config --global --get-all safe.directory | grep -qx "$APP" || git config --global --add safe.directory "$APP"
 if [ -d "$APP/.git" ]; then git -C "$APP" pull --ff-only; else git clone "$REPO" "$APP"; fi
 echo "$DOMAIN" > /opt/uhw/domain
 

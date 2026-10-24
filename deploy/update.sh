@@ -7,6 +7,8 @@ APP=/opt/uhw/app
 WEB=/var/www/uhw
 DOMAIN=$(cat /opt/uhw/domain)
 
+# The code folder belongs to the uhw user; allow root to update it.
+git config --global --get-all safe.directory | grep -qx "$APP" || git config --global --add safe.directory "$APP"
 git -C "$APP" pull --ff-only
 
 cd "$APP/backend/api" && npm ci --no-audit --no-fund
