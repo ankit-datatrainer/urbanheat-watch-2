@@ -25,7 +25,30 @@ export const LST_LAYERS: Record<string, LstLayer> = {
     satellite: "Terra",
     kind: "8-day",
   },
+  MODIS_Aqua_L3_Land_Surface_Temp_8Day_Day: {
+    id: "MODIS_Aqua_L3_Land_Surface_Temp_8Day_Day",
+    satellite: "Aqua",
+    kind: "8-day",
+  },
 };
+
+/** How many 8-day periods (Terra and Aqua each) are used to fill cloud gaps: about 3 weeks back. */
+export const FILL_PERIODS = 3;
+
+/**
+ * Sources read in order for one map date: the chosen layer first, then the Terra and Aqua 8-day
+ * composites of that period and the periods before it. A pixel takes its value from the first
+ * source that saw it clearly, so clouds in the newest view are filled by the latest clear one.
+ */
+export function fillChain(layerId: string, date: string): [string, string][] {
+  const out: [string, string][] = [[layerId, date]];
+  for (const start of compositeStarts(FILL_PERIODS, new Date(`${date}T00:00:00Z`))) {
+    for (const id of ["MODIS_Terra_L3_Land_Surface_Temp_8Day_Day", "MODIS_Aqua_L3_Land_Surface_Temp_8Day_Day"]) {
+      if (!out.some(([l, d]) => l === id && d === start)) out.push([id, start]);
+    }
+  }
+  return out;
+}
 
 export type SatelliteLst = {
   source: string;
@@ -40,6 +63,8 @@ export type SatelliteLst = {
   validPixels: number;
   totalPixels: number;
   coveragePercent: number;
+  /** Oldest imagery date used to fill cloud gaps, or null when the chosen view needed no filling. */
+  filledFrom: string | null;
   hotspot: { lat: number; lon: number; valueC: number } | null;
   tileUrlTemplate: string;
   note: string;
@@ -114,6 +139,7 @@ export function tileUrl(layerId: string, date: string) {
 export class GibsLstService {
   private colormap: Promise<Map<number, number>> | null = null;
   private tiles = new TtlCache<Promise<PNG | null>>(3 * 3600_000, 300);
+  private heatTiles = new TtlCache<Promise<Buffer | null>>(3 * 3600_000, 1000);
   private results = new TtlCache<SatelliteLst | null>(3600_000, 500);
 
   constructor(private fetchImpl: Fetch = fetch) {}
@@ -162,30 +188,61 @@ export class GibsLstService {
   }
 
   /**
-   * One GIBS tile re-coloured with a palette tuned for tropical surface temperatures
-   * (the NASA palette is almost uniformly yellow between 25 and 40 °C). Null if missing.
+   * One map tile re-coloured with a palette tuned for tropical surface temperatures (the NASA
+   * palette is almost uniformly yellow between 25 and 40 °C). Cloud gaps in the chosen view are
+   * filled from earlier clear views (see fillChain). Null when no source has any data.
    */
-  async heatTile(layerId: string, date: string, z: number, x: number, y: number): Promise<Buffer | null> {
-    if (z > ZOOM || z < 0) return null;
-    const cmap = await this.loadColormap();
-    const src = await this.tile(layerId, date, x, y, z);
-    if (!src) return null;
-    const out = new PNG({ width: TILE, height: TILE });
-    for (let i = 0; i < src.data.length; i += 4) {
-      const kelvin =
-        src.data[i + 3] === 0 ? undefined : cmap.get((src.data[i]! << 16) | (src.data[i + 1]! << 8) | src.data[i + 2]!);
-      if (kelvin === undefined) continue; // stays transparent
-      const [r, g, b] = heatColor(kelvin - 273.15);
-      out.data[i] = r;
-      out.data[i + 1] = g;
-      out.data[i + 2] = b;
-      out.data[i + 3] = 215;
+  heatTile(layerId: string, date: string, z: number, x: number, y: number): Promise<Buffer | null> {
+    if (z > ZOOM || z < 0) return Promise.resolve(null);
+    const key = `${layerId}/${date}/${z}/${x}/${y}`;
+    let hit = this.heatTiles.get(key);
+    if (!hit) {
+      hit = this.buildHeatTile(layerId, date, z, x, y).catch((e) => {
+        this.heatTiles.delete(key);
+        throw e;
+      });
+      this.heatTiles.set(key, hit);
     }
-    return PNG.sync.write(out);
+    return hit;
   }
 
-  /** Reads one layer/date for a circle around the point. Null when the imagery is missing. */
-  async read(layer: LstLayer, date: string, lat: number, lon: number, radiusKm: number): Promise<SatelliteLst | null> {
+  private async buildHeatTile(layerId: string, date: string, z: number, x: number, y: number) {
+    const cmap = await this.loadColormap();
+    const out = new PNG({ width: TILE, height: TILE });
+    let gaps = TILE * TILE;
+    let any = false;
+    for (const [id, d] of fillChain(layerId, date)) {
+      const src = await this.tile(id, d, x, y, z);
+      if (!src) continue;
+      for (let i = 0; i < src.data.length; i += 4) {
+        if (out.data[i + 3] !== 0 || src.data[i + 3] === 0) continue; // already filled, or no value here
+        const kelvin = cmap.get((src.data[i]! << 16) | (src.data[i + 1]! << 8) | src.data[i + 2]!);
+        if (kelvin === undefined) continue;
+        const [r, g, b] = heatColor(kelvin - 273.15);
+        out.data[i] = r;
+        out.data[i + 1] = g;
+        out.data[i + 2] = b;
+        out.data[i + 3] = 215;
+        gaps--;
+        any = true;
+      }
+      if (gaps === 0) break;
+    }
+    return any ? PNG.sync.write(out) : null;
+  }
+
+  /**
+   * Reads one layer/date for a circle around the point. With `fill`, cloud gaps are filled from
+   * earlier clear views exactly as on the map. Null when the chosen imagery is missing.
+   */
+  async read(
+    layer: LstLayer,
+    date: string,
+    lat: number,
+    lon: number,
+    radiusKm: number,
+    fill = false,
+  ): Promise<SatelliteLst | null> {
     const cmap = await this.loadColormap();
     const c = project(lat, lon);
     const kmPerPx = (40075 * Math.cos((lat * Math.PI) / 180)) / (TILE * 2 ** ZOOM);
@@ -195,21 +252,32 @@ export class GibsLstService {
     const y0 = Math.floor(c.y - r);
     const y1 = Math.floor(c.y + r);
 
-    const tiles = new Map<string, PNG | null>();
+    const chain = fill ? fillChain(layer.id, date) : ([[layer.id, date]] as [string, string][]);
+    const keys: [number, number][] = [];
     for (let tx = Math.floor(x0 / TILE); tx <= Math.floor(x1 / TILE); tx++) {
-      for (let ty = Math.floor(y0 / TILE); ty <= Math.floor(y1 / TILE); ty++) {
-        tiles.set(`${tx},${ty}`, await this.tile(layer.id, date, tx, ty));
-      }
+      for (let ty = Math.floor(y0 / TILE); ty <= Math.floor(y1 / TILE); ty++) keys.push([tx, ty]);
     }
-    if ([...tiles.values()].every((t) => t === null)) return null;
+    const sources = await Promise.all(
+      chain.map(async ([id, d]) => {
+        const pngs = await Promise.all(keys.map(([tx, ty]) => this.tile(id, d, tx, ty)));
+        return { date: d, tiles: new Map(keys.map(([tx, ty], i) => [`${tx},${ty}`, pngs[i]!] as const)) };
+      }),
+    );
+    if ([...sources[0]!.tiles.values()].every((t) => t === null)) return null;
 
+    let filledFrom: string | null = null;
     const valueAt = (px: number, py: number): number | null => {
-      const png = tiles.get(`${Math.floor(px / TILE)},${Math.floor(py / TILE)}`);
-      if (!png) return null;
-      const i = ((py % TILE) * TILE + (px % TILE)) * 4;
-      if (png.data[i + 3] === 0) return null; // cloud, water or no pass
-      const kelvin = cmap.get((png.data[i]! << 16) | (png.data[i + 1]! << 8) | png.data[i + 2]!);
-      return kelvin === undefined ? null : Math.round((kelvin - 273.15) * 10) / 10;
+      for (const [k, src] of sources.entries()) {
+        const png = src.tiles.get(`${Math.floor(px / TILE)},${Math.floor(py / TILE)}`);
+        if (!png) continue;
+        const i = ((py % TILE) * TILE + (px % TILE)) * 4;
+        if (png.data[i + 3] === 0) continue; // cloud, water or no pass
+        const kelvin = cmap.get((png.data[i]! << 16) | (png.data[i + 1]! << 8) | png.data[i + 2]!);
+        if (kelvin === undefined) continue;
+        if (k > 0 && (!filledFrom || src.date < filledFrom)) filledFrom = src.date;
+        return Math.round((kelvin - 273.15) * 10) / 10;
+      }
+      return null;
     };
 
     let total = 0;
@@ -243,12 +311,14 @@ export class GibsLstService {
       validPixels: values.length,
       totalPixels: total,
       coveragePercent: coverage,
+      filledFrom,
       hotspot: hot && hotPos ? { lat: hotPos.lat, lon: hotPos.lon, valueC: hot.v } : null,
       tileUrlTemplate: tileUrl(layer.id, date),
       note:
-        layer.kind === "8-day"
+        (layer.kind === "8-day"
           ? "8-day daytime composite: the clearest view over the period, used when recent passes were cloudy."
-          : "Single daytime satellite pass. Clouds and water show no value.",
+          : "Single daytime satellite pass.") +
+        (filledFrom ? ` Cloud gaps are filled with the latest clear view since ${filledFrom}.` : ""),
     };
   }
 
@@ -283,7 +353,11 @@ export class GibsLstService {
           res.validPixels >= 5 &&
           (baseline?.meanC == null || (res.meanC ?? -99) >= baseline.meanC - 5),
       ) ?? baseline;
-    this.results.set(key, best, best ? 3600_000 : 600_000);
-    return best;
+    // Report the chosen view with its cloud gaps filled, matching what the map shows.
+    const filled = best
+      ? ((await this.read(LST_LAYERS[best.layerId]!, best.date, lat, lon, radiusKm, true).catch(() => null)) ?? best)
+      : null;
+    this.results.set(key, filled, filled ? 3600_000 : 600_000);
+    return filled;
   }
 }

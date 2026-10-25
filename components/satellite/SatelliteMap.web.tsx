@@ -1,7 +1,7 @@
 import "leaflet/dist/leaflet.css";
 import L from "leaflet";
 import { useEffect, useRef } from "react";
-import { ATTRIBUTION, HEAT_NATIVE_ZOOM, IMAGERY_URL, LABELS_URL, type SatelliteMapProps } from "./shared";
+import { ATTRIBUTION, HEAT_NATIVE_ZOOM, IMAGERY_URL, type SatelliteMapProps } from "./shared";
 
 const CSS = `
 .uhw-heat img { image-rendering: pixelated; }
@@ -21,7 +21,7 @@ function injectCss() {
   document.head.appendChild(el);
 }
 
-/** Web: Leaflet with satellite imagery, the satellite heat layer and place labels. */
+/** Web: Leaflet with satellite imagery and the satellite heat layer (no place labels or landmark dots). */
 export default function SatelliteMap({
   lat,
   lon,
@@ -53,7 +53,6 @@ export default function SatelliteMap({
       maxZoom: 16,
     }).setView([lat, lon], zoom);
     L.tileLayer(IMAGERY_URL, { maxZoom: 19, attribution: ATTRIBUTION }).addTo(m);
-    L.tileLayer(LABELS_URL, { maxZoom: 19, pane: "overlayPane", zIndex: 650 }).addTo(m);
     m.on("click", (e: L.LeafletMouseEvent) => press.current?.(e.latlng.lat, e.latlng.lng));
     map.current = m;
     // React Native Web lays out after mount; keep Leaflet's size in sync.

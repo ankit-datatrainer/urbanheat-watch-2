@@ -15,6 +15,8 @@ export type SatelliteLst = {
   validPixels: number;
   totalPixels: number;
   coveragePercent: number;
+  /** Oldest imagery date used to fill cloud gaps, or null when none were needed. */
+  filledFrom?: string | null;
   hotspot: { lat: number; lon: number; valueC: number } | null;
   note: string;
 };

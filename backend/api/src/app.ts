@@ -203,7 +203,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
       const parsed = lstPointQuery.safeParse(req.query);
       if (!parsed.success) return reply.code(400).send({ error: "invalid_query", issues: parsed.error.issues });
       const { lat, lon, layerId, date } = parsed.data;
-      const res = await gibs.read(LST_LAYERS[layerId]!, date, lat, lon, 0);
+      const res = await gibs.read(LST_LAYERS[layerId]!, date, lat, lon, 0, true);
       return { lat, lon, layerId, date, valueC: res?.centerC ?? null };
     });
 

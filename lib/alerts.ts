@@ -14,7 +14,12 @@ export type DynamicAlert = {
   message: string;
   icon: keyof typeof Ionicons.glyphMap;
   action?: { label: string; route: "/family" | "/ai" | "/heatmap"; query?: string };
+  /** The family member this alert is about, for its Call and Message buttons. */
+  contact?: { memberId: string; name: string; phone: string | null };
 };
+
+/** Live heat where a family member lives, with that city's name. */
+export type MemberHeat = { heat: CityHeat; areaName: string };
 
 export const SEVERITY_RANK: Record<Severity, number> = { critical: 0, warning: 1, advisory: 2, ok: 2.5, info: 3 };
 export const NOTIFY_SEVERITIES: Severity[] = ["critical", "warning", "advisory"];
@@ -101,6 +106,8 @@ type Inputs = {
   forecast: Forecast | null;
   air: AirQuality | null;
   members: FamilyMember[];
+  /** Heat where each member lives, keyed by member id (members without an area are missing). */
+  memberHeat?: Record<string, MemberHeat>;
   t?: TFunction;
   locale?: string;
 };
@@ -112,6 +119,7 @@ export function buildAlerts({
   forecast,
   air,
   members,
+  memberHeat = {},
   t = (s, v) => translate("en", s, v),
   locale = "en",
 }: Inputs): DynamicAlert[] {
@@ -240,28 +248,48 @@ export function buildAlerts({
 
   // 6. Family
   const heatRisk = (heat && heat.band !== "Low") || (peak && peak.band !== "Low");
-  if (heatRisk) {
-    const sixHoursAgo = Date.now() - 6 * 3600_000;
-    members
-      .filter((m) => isVulnerable(m) && (!m.lastCheckIn || Date.parse(m.lastCheckIn) < sixHoursAgo))
-      .forEach((m) =>
-        out.push({
-          id: `family-${m.id}-${day}`,
-          kind: "family",
-          severity: "warning",
-          icon: "people",
-          title: t("Check on {name}", { name: m.name }),
-          message:
-            m.relation === "Child"
-              ? t("Children feel heat faster. Send {name} a quick reminder to drink water and stay cool.", {
-                  name: m.name,
-                })
-              : t("Older adults feel heat faster. Send {name} a quick reminder to drink water and stay cool.", {
-                  name: m.name,
-                }),
-          action: { label: t("Open family"), route: "/family" },
-        }),
-      );
+  const sixHoursAgo = Date.now() - 6 * 3600_000;
+  for (const m of members) {
+    const contact = { memberId: m.id, name: m.name, phone: m.phone };
+    const local = memberHeat[m.id];
+    // A member with a home city is judged only on that city's heat; wait until it has loaded.
+    if (m.areaId && !local) continue;
+    // High heat stress where the member lives is an active alert, whoever they are.
+    if (local?.heat.band === "High") {
+      out.push({
+        id: `family-high-${m.id}-${day}`,
+        kind: "family",
+        severity: "critical",
+        icon: "people",
+        title: t("High heat stress where {name} lives", { name: m.name }),
+        message: t(
+          "{area}: WBGT {wbgt}°C ({temp}°C). Call or message {name}: stay indoors or in shade, drink water often and rest.",
+          { area: t(local.areaName), wbgt: local.heat.wbgt, temp: Math.round(local.heat.temperature), name: m.name },
+        ),
+        contact,
+      });
+      continue;
+    }
+    const atRisk = local ? local.heat.band !== "Low" : heatRisk;
+    if (atRisk && isVulnerable(m) && (!m.lastCheckIn || Date.parse(m.lastCheckIn) < sixHoursAgo)) {
+      out.push({
+        id: `family-${m.id}-${day}`,
+        kind: "family",
+        severity: "warning",
+        icon: "people",
+        title: t("Check on {name}", { name: m.name }),
+        message:
+          m.relation === "Child"
+            ? t("Children feel heat faster. Send {name} a quick reminder to drink water and stay cool.", {
+                name: m.name,
+              })
+            : t("Older adults feel heat faster. Send {name} a quick reminder to drink water and stay cool.", {
+                name: m.name,
+              }),
+        action: { label: t("Open family"), route: "/family" },
+        contact,
+      });
+    }
   }
   const pending = members.filter((m) => m.status === "invited").length;
   if (pending > 0) {

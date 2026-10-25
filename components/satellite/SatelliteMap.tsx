@@ -5,7 +5,7 @@ import { HEAT_NATIVE_ZOOM, type SatelliteMapProps } from "./shared";
 
 const zoomToDelta = (z: number) => 360 / 2 ** z;
 
-/** Native: Apple/Google satellite imagery with the satellite heat layer on top. */
+/** Native: Apple/Google satellite imagery (no place labels or landmark dots) with the heat layer on top. */
 export default function SatelliteMap({
   lat,
   lon,
@@ -29,7 +29,8 @@ export default function SatelliteMap({
     <MapView
       ref={ref}
       style={StyleSheet.absoluteFill}
-      mapType="hybrid"
+      mapType="satellite"
+      showsPointsOfInterests={false}
       initialRegion={{
         latitude: lat,
         longitude: lon,

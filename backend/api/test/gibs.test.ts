@@ -1,7 +1,7 @@
 // NASA GIBS satellite LST decoding with MOCKED tiles and colormap (test-only).
 import { PNG } from "pngjs";
 import { describe, expect, it } from "vitest";
-import { GibsLstService, LST_LAYERS, compositeStarts } from "../src/gibs.js";
+import { GibsLstService, LST_LAYERS, compositeStarts, fillChain } from "../src/gibs.js";
 
 // Two colormap bands: 300.2-300.8 K (27.35 °C) and 320.0-320.6 K (47.15 °C).
 const COLORMAP = `<ColorMap>
@@ -11,13 +11,13 @@ ${Array.from({ length: 120 }, (_, i) => `<ColorMapEntry rgb="10,${i},10" transpa
 <ColorMapEntry rgb="255,151,0" transparent="false" sourceValue="[16000,16030)" value="[320.00,320.60)" ref="202"/>
 </ColorMap>`;
 
-/** A tile where the left half is 27.35 °C, the right half 47.15 °C, and the top rows are cloud. */
-function tilePng() {
+/** A tile where the left half is 27.35 °C, the right half 47.15 °C, and the top `cloudRows` rows are cloud. */
+function tilePng(cloudRows = 8) {
   const png = new PNG({ width: 256, height: 256 });
   for (let y = 0; y < 256; y++) {
     for (let x = 0; x < 256; x++) {
       const i = (y * 256 + x) * 4;
-      const cloud = y < 8;
+      const cloud = y < cloudRows;
       const [r, g, b] = x < 128 ? [255, 253, 0] : [255, 151, 0];
       png.data[i] = r;
       png.data[i + 1] = g;
@@ -28,12 +28,14 @@ function tilePng() {
   return PNG.sync.write(png);
 }
 
-function fakeFetch() {
+/** Every tile has 8 cloud rows, except that the daily Terra layer (when `cloudyDaily`) is mostly cloud. */
+function fakeFetch({ cloudyDaily = false } = {}) {
   const urls: string[] = [];
   const impl = (async (url: string) => {
     urls.push(url);
     if (url.includes("colormaps")) return new Response(COLORMAP);
-    return new Response(new Uint8Array(tilePng()), { headers: { "Content-Type": "image/png" } });
+    const rows = cloudyDaily && url.includes("/MODIS_Terra_Land_Surface_Temp_Day/") ? 200 : 0;
+    return new Response(new Uint8Array(tilePng(cloudyDaily ? rows : 8)), { headers: { "Content-Type": "image/png" } });
   }) as unknown as typeof fetch;
   return { impl, urls };
 }
@@ -49,6 +51,36 @@ describe("GIBS satellite LST", () => {
     expect(res!.minC).toBeCloseTo(27.4, 1);
     expect(res!.maxC).toBeCloseTo(47.2, 1);
     expect(res!.tileUrlTemplate).toContain("MODIS_Terra_Land_Surface_Temp_Day/default/2026-10-16/");
+  });
+
+  it("fills cloud gaps from earlier Terra and Aqua composites, newest first", () => {
+    expect(fillChain("MODIS_Terra_Land_Surface_Temp_Day", "2026-10-17")).toEqual([
+      ["MODIS_Terra_Land_Surface_Temp_Day", "2026-10-17"],
+      ["MODIS_Terra_L3_Land_Surface_Temp_8Day_Day", "2026-10-16"],
+      ["MODIS_Aqua_L3_Land_Surface_Temp_8Day_Day", "2026-10-16"],
+      ["MODIS_Terra_L3_Land_Surface_Temp_8Day_Day", "2026-10-08"],
+      ["MODIS_Aqua_L3_Land_Surface_Temp_8Day_Day", "2026-10-08"],
+      ["MODIS_Terra_L3_Land_Surface_Temp_8Day_Day", "2026-09-30"],
+      ["MODIS_Aqua_L3_Land_Surface_Temp_8Day_Day", "2026-09-30"],
+    ]);
+    // The chosen composite is not repeated.
+    const chain = fillChain("MODIS_Terra_L3_Land_Surface_Temp_8Day_Day", "2026-09-30");
+    expect(chain[0]).toEqual(["MODIS_Terra_L3_Land_Surface_Temp_8Day_Day", "2026-09-30"]);
+    expect(chain.filter(([l, d]) => l === chain[0]![0] && d === chain[0]![1])).toHaveLength(1);
+  });
+
+  it("covers the whole area when a cloudy daily pass is filled from the composites", async () => {
+    const svc = new GibsLstService(fakeFetch({ cloudyDaily: true }).impl);
+    const layer = LST_LAYERS.MODIS_Terra_Land_Surface_Temp_Day!;
+    // 1.35°N is around row 133 of its z7 tile, inside the daily pass's cloud.
+    const raw = await svc.read(layer, "2026-10-17", 1.35, 102.66, 5);
+    const filled = await svc.read(layer, "2026-10-17", 1.35, 102.66, 5, true);
+    expect(raw!.coveragePercent).toBe(0);
+    expect(filled!.coveragePercent).toBe(100);
+    expect(filled!.filledFrom).toBe("2026-10-16");
+
+    const png = PNG.sync.read((await svc.heatTile(layer.id, "2026-10-17", 7, 100, 63))!);
+    expect(png.data[3]).toBe(215); // top-left pixel was cloud in the daily pass, now filled
   });
 
   it("lists MODIS 8-day period starts on day-of-year 1, 9, 17 ...", () => {

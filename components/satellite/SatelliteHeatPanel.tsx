@@ -169,11 +169,17 @@ export default function SatelliteHeatPanel({ style, zoom = 10 }: Props) {
                 <View style={styles.divider} />
                 <View style={styles.stat}>
                   <Text style={styles.statValue}>{sat.coveragePercent}%</Text>
-                  <Text style={styles.statLabel}>{t("Clear view")}</Text>
+                  <Text style={styles.statLabel}>{t("Map coverage")}</Text>
                 </View>
               </View>
               {mode === "heat" && <Legend />}
-              <Text style={styles.hint}>{t("Tap the map to read the satellite temperature at any point.")}</Text>
+              <Text style={styles.hint}>
+                {sat.filledFrom
+                  ? t("Cloudy spots show the latest clear view since {date}.", {
+                      date: formatSatDate(sat.filledFrom, locale),
+                    })
+                  : t("Tap the map to read the satellite temperature at any point.")}
+              </Text>
             </>
           ) : (
             <Text style={styles.statLabel}>

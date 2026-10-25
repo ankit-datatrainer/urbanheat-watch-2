@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ActivityIndicator, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
+import { ActivityIndicator, Modal, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import Animated, {
   Easing,
   FadeInDown,
   FadeOutLeft,
   LinearTransition,
+  SlideInDown,
   useAnimatedStyle,
   useSharedValue,
   withRepeat,
@@ -17,7 +18,9 @@ import { Ionicons } from "@expo/vector-icons";
 import { LinearGradient } from "expo-linear-gradient";
 import { useCity } from "../../components/CityContext";
 import { useAlerts } from "../../context/alerts";
-import { hourLabel, type AlertKind, type DynamicAlert } from "../../lib/alerts";
+import { useFamily } from "../../context/family";
+import { NOTIFY_SEVERITIES, hourLabel, type AlertKind, type DynamicAlert } from "../../lib/alerts";
+import { callPhone, forwardMessage, memberArea, shareVia, type FamilyMember } from "../../lib/family";
 import { SEVERITY_STYLE } from "../../components/alerts/severity";
 import { tx, useI18n } from "../../lib/i18n";
 import ScreenHeader from "../../components/ui/ScreenHeader";
@@ -49,7 +52,22 @@ function LivePulse({ color }: { color: string }) {
   );
 }
 
-function AlertCard({ alert, index, onDismiss }: { alert: DynamicAlert; index: number; onDismiss: () => void }) {
+/** Alerts worth passing on to family: heat now, heat coming, and family checks. */
+const FORWARDABLE: AlertKind[] = ["heat", "forecast", "family", "air"];
+
+function AlertCard({
+  alert,
+  index,
+  onDismiss,
+  onCall,
+  onMessage,
+}: {
+  alert: DynamicAlert;
+  index: number;
+  onDismiss: () => void;
+  onCall?: () => void;
+  onMessage?: () => void;
+}) {
   const s = SEVERITY_STYLE[alert.severity];
   const { t } = useI18n();
   const shake = useSharedValue(0);
@@ -97,6 +115,26 @@ function AlertCard({ alert, index, onDismiss }: { alert: DynamicAlert; index: nu
         )}
       </View>
       <Text style={styles.cardMsg}>{alert.message}</Text>
+      {(onCall || onMessage) && (
+        <View style={styles.contactRow}>
+          {onCall && (
+            <PressableScale onPress={onCall} style={[styles.contactBtn, { backgroundColor: C.info }]}>
+              <Ionicons name="call" size={15} color="#FFFFFF" />
+              <Text style={styles.contactText}>
+                {alert.contact ? t("Call {name}", { name: alert.contact.name }) : t("Call family")}
+              </Text>
+            </PressableScale>
+          )}
+          {onMessage && (
+            <PressableScale onPress={onMessage} style={[styles.contactBtn, { backgroundColor: "#25D366" }]}>
+              <Ionicons name="chatbubble-ellipses" size={15} color="#FFFFFF" />
+              <Text style={styles.contactText}>
+                {alert.contact ? t("Message {name}", { name: alert.contact.name }) : t("Message family")}
+              </Text>
+            </PressableScale>
+          )}
+        </View>
+      )}
       {alert.action && (
         <PressableScale
           style={[styles.cardAction, { borderColor: s.color }]}
@@ -169,6 +207,32 @@ export default function AlertsScreen() {
     restoreDismissed,
   } = useAlerts();
   const [filter, setFilter] = useState<(typeof FILTERS)[number]["key"]>("all");
+  const { members } = useFamily();
+  const [forward, setForward] = useState<{ alert: DynamicAlert; mode: "call" | "message" } | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
+  const showToast = (msg: string) => {
+    setToast(msg);
+    setTimeout(() => setToast((cur) => (cur === msg ? null : cur)), 2400);
+  };
+
+  async function call(m: FamilyMember) {
+    setForward(null);
+    if (!m.phone || !(await callPhone(m.phone))) showToast(t("Calling isn't available on this device"));
+  }
+
+  async function message(a: DynamicAlert, m: FamilyMember) {
+    setForward(null);
+    const res = await shareVia("whatsapp", forwardMessage(m.name, a.title, a.message, t), { phone: m.phone });
+    showToast(
+      res === "opened" ? t("Alert opened in WhatsApp for {name}", { name: m.name }) : t("Alert copied to clipboard"),
+    );
+  }
+
+  async function shareOther(a: DynamicAlert) {
+    setForward(null);
+    const res = await shareVia("more", `${a.title}\n${a.message}\n\nUrbanHeat Watch`);
+    if (res === "copied") showToast(t("Alert copied to clipboard"));
+  }
 
   // Opening the tab counts as reading the alerts (clears the badge).
   useFocusEffect(
@@ -280,9 +344,35 @@ export default function AlertsScreen() {
               })}
             </ScrollView>
 
-            {shown.map((a, i) => (
-              <AlertCard key={a.id} alert={a} index={i} onDismiss={() => dismiss(a.id)} />
-            ))}
+            {shown.map((a, i) => {
+              const forwardable =
+                !!a.contact || (FORWARDABLE.includes(a.kind) && NOTIFY_SEVERITIES.includes(a.severity));
+              const member = a.contact ? members.find((m) => m.id === a.contact!.memberId) : undefined;
+              return (
+                <AlertCard
+                  key={a.id}
+                  alert={a}
+                  index={i}
+                  onDismiss={() => dismiss(a.id)}
+                  onCall={
+                    !forwardable
+                      ? undefined
+                      : member
+                        ? member.phone
+                          ? () => call(member)
+                          : undefined
+                        : () => setForward({ alert: a, mode: "call" })
+                  }
+                  onMessage={
+                    !forwardable
+                      ? undefined
+                      : member
+                        ? () => message(a, member)
+                        : () => setForward({ alert: a, mode: "message" })
+                  }
+                />
+              );
+            })}
             {shown.length === 0 && (
               <Animated.View entering={FadeInDown} style={styles.empty}>
                 <Ionicons name="checkmark-done-circle" size={40} color={C.low} />
@@ -321,6 +411,73 @@ export default function AlertsScreen() {
           </>
         )}
       </ScrollView>
+
+      {toast && (
+        <Animated.View entering={FadeInDown.springify()} style={styles.toast} pointerEvents="none">
+          <Ionicons name="information-circle" size={16} color="#FFFFFF" />
+          <Text style={styles.toastText}>{toast}</Text>
+        </Animated.View>
+      )}
+
+      <Modal visible={forward !== null} transparent animationType="fade" onRequestClose={() => setForward(null)}>
+        <View style={styles.backdrop}>
+          <Pressable style={StyleSheet.absoluteFill} onPress={() => setForward(null)} accessibilityLabel={t("Close")} />
+          {forward && (
+            <Animated.View entering={SlideInDown.springify().damping(18)} style={styles.sheet}>
+              <View style={styles.grabber} />
+              <Text style={styles.sheetTitle}>
+                {forward.mode === "call" ? t("Call a family member") : t("Send this alert to family")}
+              </Text>
+              <Text style={styles.sheetSub} numberOfLines={2}>
+                {forward.alert.title}
+              </Text>
+              {members.length === 0 ? (
+                <Text style={styles.sheetEmpty}>
+                  {t("Add family members in the Family tab to call or message them from here.")}
+                </Text>
+              ) : (
+                members.map((m) => (
+                  <View key={m.id} style={styles.memberRow}>
+                    <View style={styles.flex}>
+                      <Text style={styles.memberName}>{m.name}</Text>
+                      <Text style={styles.memberMeta} numberOfLines={1}>
+                        {t(m.relation)} · {t(memberArea(m, city).name)}
+                      </Text>
+                    </View>
+                    {m.phone ? (
+                      <PressableScale
+                        onPress={() => call(m)}
+                        style={[styles.roundBtn, { backgroundColor: C.info }]}
+                        accessibilityLabel={t("Call {name}", { name: m.name })}
+                      >
+                        <Ionicons name="call" size={17} color="#FFFFFF" />
+                      </PressableScale>
+                    ) : (
+                      <Text style={styles.noPhone}>{t("No phone")}</Text>
+                    )}
+                    <PressableScale
+                      onPress={() => message(forward.alert, m)}
+                      style={[styles.roundBtn, { backgroundColor: "#25D366" }]}
+                      accessibilityLabel={t("Message {name}", { name: m.name })}
+                    >
+                      <Ionicons name="logo-whatsapp" size={17} color="#FFFFFF" />
+                    </PressableScale>
+                  </View>
+                ))
+              )}
+              {forward.mode === "message" && (
+                <PressableScale onPress={() => shareOther(forward.alert)} style={styles.otherBtn}>
+                  <Ionicons name="share-social" size={16} color={C.brand} />
+                  <Text style={styles.otherText}>{t("Share another way")}</Text>
+                </PressableScale>
+              )}
+              <Pressable onPress={() => setForward(null)} style={styles.sheetClose}>
+                <Text style={styles.sheetCloseText}>{t("Close")}</Text>
+              </Pressable>
+            </Animated.View>
+          )}
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -425,6 +582,79 @@ const styles = StyleSheet.create({
     backgroundColor: "#FFFFFF",
   },
   cardActionText: { fontSize: 13, fontFamily: F.bodySemi },
+  contactRow: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 12 },
+  contactBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    borderRadius: R.pill,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+  },
+  contactText: { color: "#FFFFFF", fontSize: 13, fontFamily: F.bodySemi },
+
+  toast: {
+    position: "absolute",
+    bottom: 110,
+    alignSelf: "center",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    backgroundColor: C.ink,
+    borderRadius: R.pill,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    maxWidth: "90%",
+    ...shadow(3),
+  },
+  toastText: { color: "#FFFFFF", fontSize: 13, fontFamily: F.bodySemi },
+  backdrop: { flex: 1, justifyContent: "flex-end", backgroundColor: "rgba(20,12,8,0.5)" },
+  sheet: {
+    backgroundColor: C.surface,
+    borderTopLeftRadius: 28,
+    borderTopRightRadius: 28,
+    padding: 20,
+    paddingBottom: 30,
+    width: "100%",
+    maxWidth: 640,
+    alignSelf: "center",
+  },
+  grabber: {
+    width: 44,
+    height: 5,
+    borderRadius: 3,
+    backgroundColor: C.borderStrong,
+    alignSelf: "center",
+    marginBottom: 12,
+  },
+  sheetTitle: { fontSize: 19, fontFamily: F.display, color: C.ink, textAlign: "center" },
+  sheetSub: { fontSize: 13, fontFamily: F.body, color: C.inkSoft, textAlign: "center", marginTop: 4, marginBottom: 10 },
+  sheetEmpty: { fontSize: 14, fontFamily: F.body, color: C.inkSoft, textAlign: "center", lineHeight: 20, marginTop: 8 },
+  memberRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    paddingVertical: 11,
+    borderBottomWidth: 1,
+    borderBottomColor: C.border,
+  },
+  memberName: { fontSize: 15, fontFamily: F.bodySemi, color: C.ink },
+  memberMeta: { fontSize: 12, fontFamily: F.body, color: C.inkMuted, marginTop: 1 },
+  roundBtn: { width: 40, height: 40, borderRadius: 20, alignItems: "center", justifyContent: "center" },
+  noPhone: { fontSize: 11.5, fontFamily: F.body, color: C.inkMuted },
+  otherBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+    marginTop: 14,
+    backgroundColor: C.brandTint,
+    borderRadius: R.md,
+    paddingVertical: 12,
+  },
+  otherText: { color: C.brand, fontSize: 14, fontFamily: F.bodySemi },
+  sheetClose: { alignSelf: "center", padding: 12, marginTop: 4 },
+  sheetCloseText: { color: C.inkMuted, fontFamily: F.bodySemi },
   pulseWrap: { width: 10, height: 10, alignItems: "center", justifyContent: "center" },
   pulseRing: { position: "absolute", width: 10, height: 10, borderRadius: 5 },
   pulseDot: { width: 6, height: 6, borderRadius: 3 },

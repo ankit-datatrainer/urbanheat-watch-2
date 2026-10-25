@@ -25,21 +25,25 @@ import Animated, {
 import { Ionicons } from "@expo/vector-icons";
 import { LinearGradient } from "expo-linear-gradient";
 import { useCity } from "../../components/CityContext";
+import { ASEAN_CITIES, type City } from "../../components/aseanCities";
 import { useAuth } from "../../context/auth";
 import { useFamily } from "../../context/family";
 import { useAlerts } from "../../context/alerts";
 import { tx, useI18n, type TFunction } from "../../lib/i18n";
 import {
   RELATIONS,
+  callPhone,
   inviteLink,
   inviteMessage,
   isVulnerable,
+  memberArea,
   reminderMessage,
   shareVia,
   type FamilyMember,
   type Relation,
   type ShareChannel,
 } from "../../lib/family";
+import type { HeatBand } from "../../lib/heat";
 import ScreenHeader from "../../components/ui/ScreenHeader";
 import PressableScale from "../../components/ui/PressableScale";
 import Reveal from "../../components/ui/Reveal";
@@ -186,27 +190,79 @@ function ShareSheet({
 
 /* ---------------- Add member form ---------------- */
 
+/** Search the app's cities and pick the one the member lives in. */
+function AreaPicker({ value, onChange }: { value: City; onChange: (c: City) => void }) {
+  const { t } = useI18n();
+  const [query, setQuery] = useState("");
+  const q = query.trim().toLowerCase();
+  const matches = q
+    ? ASEAN_CITIES.filter((c) => `${t(c.name)} ${c.name} ${t(c.country)} ${c.country}`.toLowerCase().includes(q)).slice(
+        0,
+        6,
+      )
+    : [];
+  return (
+    <View>
+      <View style={styles.inputWrap}>
+        <Ionicons name="location-outline" size={18} color={C.brand} />
+        <TextInput
+          value={query}
+          onChangeText={setQuery}
+          placeholder={t("{city}, {country}", { city: t(value.name), country: t(value.country) })}
+          placeholderTextColor={C.ink}
+          style={styles.input}
+          accessibilityLabel={t("City or area")}
+        />
+      </View>
+      {matches.length > 0 && (
+        <View style={styles.areaList}>
+          {matches.map((c) => (
+            <Pressable
+              key={c.id}
+              onPress={() => {
+                onChange(c);
+                setQuery("");
+              }}
+              style={styles.areaRow}
+            >
+              <Text style={styles.areaCity}>{t(c.name)}</Text>
+              <Text style={styles.areaCountry}>{t(c.country)}</Text>
+            </Pressable>
+          ))}
+        </View>
+      )}
+    </View>
+  );
+}
+
 function AddMemberForm({ onCreated, onCancel }: { onCreated: (m: FamilyMember) => void; onCancel: () => void }) {
   const { add } = useFamily();
+  const { city } = useCity();
   const { t } = useI18n();
   const [name, setName] = useState("");
   const [relation, setRelation] = useState<Relation>("Parent");
+  const [address, setAddress] = useState("");
+  const [area, setArea] = useState<City>(city);
   const [phone, setPhone] = useState("");
-  const [email, setEmail] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   async function submit() {
     const n = name.trim();
     if (!n) return setError(t("Please enter a name."));
-    if (email.trim() && !/^\S+@\S+\.\S+$/.test(email.trim()))
-      return setError(t("That email address doesn't look right."));
+    if (!address.trim()) return setError(t("Please enter their address."));
     if (phone.trim() && phone.replace(/[^\d]/g, "").length < 7)
       return setError(t("Include the full phone number with country code."));
     setError(null);
     setSaving(true);
     try {
-      const m = await add({ name: n, relation, phone: phone.trim() || null, email: email.trim() || null });
+      const m = await add({
+        name: n,
+        relation,
+        address: address.trim().slice(0, 200),
+        areaId: area.id,
+        phone: phone.trim() || null,
+      });
       onCreated(m);
     } catch (e: any) {
       setError(e?.message ?? "Couldn't save. Please try again.");
@@ -258,29 +314,31 @@ function AddMemberForm({ onCreated, onCancel }: { onCreated: (m: FamilyMember) =
         </Animated.View>
       )}
 
-      <Text style={styles.fieldLabel}>{t("WhatsApp / mobile (optional)")}</Text>
+      <Text style={styles.fieldLabel}>{t("Address")}</Text>
       <View style={styles.inputWrap}>
-        <Ionicons name="logo-whatsapp" size={18} color="#25D366" />
+        <Ionicons name="home-outline" size={18} color={C.inkMuted} />
         <TextInput
-          value={phone}
-          onChangeText={setPhone}
-          placeholder="+65 9123 4567"
+          value={address}
+          onChangeText={setAddress}
+          placeholder={t("e.g. Jl. Sudirman 12, Tanah Abang")}
           placeholderTextColor={C.inkMuted}
-          keyboardType="phone-pad"
           style={styles.input}
+          maxLength={200}
         />
       </View>
 
-      <Text style={styles.fieldLabel}>{t("Email (optional)")}</Text>
+      <Text style={styles.fieldLabel}>{t("City or area (for their heat alerts)")}</Text>
+      <AreaPicker value={area} onChange={setArea} />
+
+      <Text style={styles.fieldLabel}>{t("Phone for Call and Message (optional)")}</Text>
       <View style={styles.inputWrap}>
-        <Ionicons name="mail-outline" size={18} color={C.info} />
+        <Ionicons name="call-outline" size={18} color={C.leaf} />
         <TextInput
-          value={email}
-          onChangeText={setEmail}
-          placeholder="name@example.com"
+          value={phone}
+          onChangeText={setPhone}
+          placeholder="+62 812 3456 7890"
           placeholderTextColor={C.inkMuted}
-          keyboardType="email-address"
-          autoCapitalize="none"
+          keyboardType="phone-pad"
           style={styles.input}
         />
       </View>
@@ -306,11 +364,20 @@ function AddMemberForm({ onCreated, onCancel }: { onCreated: (m: FamilyMember) =
 
 /* ---------------- Member card ---------------- */
 
+const BAND_STYLE: Record<HeatBand, { color: string; tint: string; label: string }> = {
+  Low: { color: C.low, tint: C.lowTint, label: tx("Low heat stress") },
+  Moderate: { color: "#B9770E", tint: C.moderateTint, label: tx("Moderate heat stress") },
+  High: { color: C.high, tint: C.highTint, label: tx("High heat stress") },
+};
+
 function MemberCard({
   member,
   index,
   needsCheck,
+  areaName,
+  band,
   onRemind,
+  onCall,
   onInvite,
   onCheckIn,
   onRemove,
@@ -318,7 +385,10 @@ function MemberCard({
   member: FamilyMember;
   index: number;
   needsCheck: boolean;
+  areaName: string;
+  band: HeatBand | null;
   onRemind: () => void;
+  onCall: () => void;
   onInvite: () => void;
   onCheckIn: () => void;
   onRemove: () => void;
@@ -366,7 +436,24 @@ function MemberCard({
           <Ionicons name="trash-outline" size={18} color={C.inkMuted} />
         </Pressable>
       </View>
+      <View style={styles.addressRow}>
+        <Ionicons name="location" size={14} color={C.brand} />
+        <Text style={styles.addressText} numberOfLines={2}>
+          {member.address ? `${member.address} · ${t(areaName)}` : t(areaName)}
+        </Text>
+        {band && (
+          <View style={[styles.tag, { backgroundColor: BAND_STYLE[band].tint }]}>
+            <Text style={[styles.tagText, { color: BAND_STYLE[band].color }]}>{t(BAND_STYLE[band].label)}</Text>
+          </View>
+        )}
+      </View>
       <View style={styles.memberActions}>
+        {member.phone && (
+          <PressableScale onPress={onCall} style={[styles.actionBtn, { backgroundColor: C.info }]}>
+            <Ionicons name="call" size={15} color="#FFFFFF" />
+            <Text style={styles.actionText}>{t("Call")}</Text>
+          </PressableScale>
+        )}
         <PressableScale onPress={onRemind} style={[styles.actionBtn, { backgroundColor: "#25D366" }]}>
           <Ionicons name="logo-whatsapp" size={15} color="#FFFFFF" />
           <Text style={styles.actionText}>{t("Remind")}</Text>
@@ -393,9 +480,12 @@ export default function FamilyScreen() {
   const { user } = useAuth();
   const { t } = useI18n();
   const { members, loading, mode, checkIn, remove } = useFamily();
-  const { heat, forecast } = useAlerts();
+  const { heat, forecast, memberHeat } = useAlerts();
   const [sheet, setSheet] = useState<{ type: "add" } | { type: "share"; member: FamilyMember } | null>(null);
   const toast = useToast();
+  /** Heat band where the member lives (their area, or the app's city when none was set). */
+  const bandOf = (m: FamilyMember): HeatBand | null =>
+    memberHeat[m.id]?.heat.band ?? (m.areaId ? null : (heat?.band ?? null));
 
   const inviter = (
     (user?.user_metadata?.full_name as string | undefined)?.trim() ||
@@ -404,13 +494,26 @@ export default function FamilyScreen() {
   ).split(" ")[0];
   const now = useNow();
   const heatRisk = (heat && heat.band !== "Low") || forecast?.hours.some((h) => h.band !== "Low");
-  const needsCheck = (m: FamilyMember) =>
-    !!heatRisk && isVulnerable(m) && (!m.lastCheckIn || now - Date.parse(m.lastCheckIn) > 6 * 3600_000);
+  const stale = (m: FamilyMember) => !m.lastCheckIn || now - Date.parse(m.lastCheckIn) > 6 * 3600_000;
+  const needsCheck = (m: FamilyMember) => {
+    const local = memberHeat[m.id]?.heat.band;
+    if (m.areaId && !local) return false; // their city's heat hasn't loaded yet
+    if (local === "High") return stale(m); // high heat where they live: everyone needs a check
+    const risk = local ? local !== "Low" : heatRisk;
+    return !!risk && isVulnerable(m) && stale(m);
+  };
   const joined = members.filter((m) => m.status === "joined").length;
   const attention = members.filter(needsCheck).length;
 
+  async function call(m: FamilyMember) {
+    if (!m.phone || !(await callPhone(m.phone))) toast.show(t("Calling isn't available on this device"));
+  }
+
   async function remind(m: FamilyMember) {
-    const res = await shareVia("whatsapp", reminderMessage(m.name, t(city.name), heat?.band, t), { phone: m.phone });
+    const area = memberArea(m, city);
+    const res = await shareVia("whatsapp", reminderMessage(m.name, t(area.name), bandOf(m) ?? undefined, t), {
+      phone: m.phone,
+    });
     toast.show(
       res === "opened"
         ? t("Reminder opened in WhatsApp for {name}", { name: m.name })
@@ -503,7 +606,10 @@ export default function FamilyScreen() {
               member={m}
               index={i}
               needsCheck={needsCheck(m)}
+              areaName={memberArea(m, city).name}
+              band={bandOf(m)}
               onRemind={() => remind(m)}
+              onCall={() => call(m)}
               onInvite={() => setSheet({ type: "share", member: m })}
               onCheckIn={() => checkIn(m.id).then(() => toast.show(t("{name} marked safe", { name: m.name })))}
               onRemove={() => confirmRemove(m)}
@@ -661,6 +767,26 @@ const styles = StyleSheet.create({
   tag: { backgroundColor: C.bgDeep, borderRadius: 7, paddingHorizontal: 8, paddingVertical: 2 },
   tagText: { fontSize: 11, fontFamily: F.bodySemi, color: C.inkSoft },
   checkedIn: { fontSize: 12, fontFamily: F.body, color: C.inkMuted, marginTop: 5 },
+  addressRow: { flexDirection: "row", alignItems: "center", gap: 6, marginTop: 12, flexWrap: "wrap" },
+  addressText: { flexShrink: 1, fontSize: 13, fontFamily: F.body, color: C.inkSoft },
+  areaList: {
+    marginTop: 6,
+    borderRadius: R.md,
+    borderWidth: 1,
+    borderColor: C.border,
+    backgroundColor: C.surface,
+    overflow: "hidden",
+  },
+  areaRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    paddingHorizontal: 14,
+    paddingVertical: 11,
+    borderBottomWidth: 1,
+    borderBottomColor: C.border,
+  },
+  areaCity: { fontSize: 14.5, fontFamily: F.bodySemi, color: C.ink },
+  areaCountry: { fontSize: 13, fontFamily: F.body, color: C.inkMuted },
   memberActions: { flexDirection: "row", gap: 8, marginTop: 14, flexWrap: "wrap" },
   actionBtn: {
     flexDirection: "row",

@@ -5,6 +5,8 @@ import { useCity } from "../components/CityContext";
 import { useFamily } from "./family";
 import { useI18n } from "../lib/i18n";
 import { fetchCityHeat, type CityHeat } from "../lib/heat";
+import { memberArea } from "../lib/family";
+import { ASEAN_CITIES } from "../components/aseanCities";
 import {
   NOTIFY_SEVERITIES,
   buildAlerts,
@@ -13,6 +15,7 @@ import {
   type AirQuality,
   type DynamicAlert,
   type Forecast,
+  type MemberHeat,
 } from "../lib/alerts";
 
 const REFRESH_MS = 5 * 60_000;
@@ -23,6 +26,8 @@ type AlertsContextType = {
   heat: CityHeat | null;
   forecast: Forecast | null;
   air: AirQuality | null;
+  /** Live heat where each family member lives, keyed by member id. */
+  memberHeat: Record<string, MemberHeat>;
   loading: boolean;
   refreshing: boolean;
   updatedAt: number | null;
@@ -50,6 +55,8 @@ export function AlertsProvider({ children }: { children: ReactNode }) {
     heat: CityHeat | null;
     forecast: Forecast | null;
     air: AirQuality | null;
+    /** Heat in the other cities family members live in, keyed by city id. */
+    areaHeat: Record<string, CityHeat>;
     updatedAt: number;
   } | null>(null);
   const [refreshing, setRefreshing] = useState(false);
@@ -59,6 +66,12 @@ export function AlertsProvider({ children }: { children: ReactNode }) {
   const forecast = current?.forecast ?? null;
   const air = current?.air ?? null;
   const updatedAt = current?.updatedAt ?? null;
+  // Member cities other than the app's city, as a stable key so the loader re-runs only when they change.
+  const areaKey = useMemo(
+    () =>
+      [...new Set(members.map((m) => m.areaId).filter((id): id is string => !!id && id !== city.id))].sort().join(","),
+    [members, city.id],
+  );
   const [seen, setSeen] = useState<string[]>([]);
   const [dismissed, setDismissed] = useState<string[]>([]);
   const [fresh, setFresh] = useState<DynamicAlert | null>(null);
@@ -81,24 +94,35 @@ export function AlertsProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const load = useCallback(async () => {
-    const [h, f, a] = await Promise.allSettled([
-      fetchCityHeat(city.lat, city.lon),
-      fetchForecast(city.lat, city.lon),
-      fetchAirQuality(city.lat, city.lon),
+    const areas = areaKey ? ASEAN_CITIES.filter((c) => areaKey.split(",").includes(c.id)) : [];
+    const [[h, f, a], areaResults] = await Promise.all([
+      Promise.allSettled([
+        fetchCityHeat(city.lat, city.lon),
+        fetchForecast(city.lat, city.lon),
+        fetchAirQuality(city.lat, city.lon),
+      ]),
+      Promise.allSettled(areas.map((c) => fetchCityHeat(c.lat, c.lon))),
     ]);
     // A failed source keeps its last good value for this city.
     setData((prev) => {
       const same = prev?.cityId === city.id ? prev : null;
+      const areaHeat: Record<string, CityHeat> = {};
+      areas.forEach((c, i) => {
+        const r = areaResults[i]!;
+        const v = r.status === "fulfilled" ? r.value : same?.areaHeat[c.id];
+        if (v) areaHeat[c.id] = v;
+      });
       return {
         cityId: city.id,
         heat: h.status === "fulfilled" ? h.value : (same?.heat ?? null),
         forecast: f.status === "fulfilled" ? f.value : (same?.forecast ?? null),
         air: a.status === "fulfilled" ? a.value : (same?.air ?? null),
+        areaHeat,
         updatedAt: Date.now(),
       };
     });
     setRefreshing(false);
-  }, [city.id, city.lat, city.lon]);
+  }, [city.id, city.lat, city.lon, areaKey]);
 
   useEffect(() => {
     knownIds.current = null; // a new city should not toast every alert at once
@@ -115,9 +139,21 @@ export function AlertsProvider({ children }: { children: ReactNode }) {
     };
   }, [load]);
 
+  const areaHeat = current?.areaHeat;
+  const memberHeat = useMemo(() => {
+    const out: Record<string, MemberHeat> = {};
+    for (const m of members) {
+      if (!m.areaId) continue; // no area chosen: their alerts follow the app's city
+      const area = memberArea(m, city);
+      const h = area.id === city.id ? heat : areaHeat?.[area.id];
+      if (h) out[m.id] = { heat: h, areaName: area.name };
+    }
+    return out;
+  }, [members, city, heat, areaHeat]);
+
   const all = useMemo(
-    () => (loading ? [] : buildAlerts({ cityName: city.name, heat, forecast, air, members, t, locale })),
-    [loading, city.name, heat, forecast, air, members, t, locale],
+    () => (loading ? [] : buildAlerts({ cityName: city.name, heat, forecast, air, members, memberHeat, t, locale })),
+    [loading, city.name, heat, forecast, air, members, memberHeat, t, locale],
   );
   const alerts = useMemo(() => all.filter((a) => !dismissed.includes(a.id)), [all, dismissed]);
 
@@ -169,6 +205,7 @@ export function AlertsProvider({ children }: { children: ReactNode }) {
         heat,
         forecast,
         air,
+        memberHeat,
         loading,
         refreshing,
         updatedAt,

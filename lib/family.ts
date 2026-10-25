@@ -4,6 +4,7 @@ import * as Clipboard from "expo-clipboard";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { supabase } from "./supabase";
 import { translate, tx, type TFunction } from "./i18n";
+import { ASEAN_CITIES, type City } from "../components/aseanCities";
 
 export type Relation = "Parent" | "Grandparent" | "Child" | "Sibling" | "Partner" | "Friend" | "Other";
 export const RELATIONS: Relation[] = [
@@ -23,18 +24,28 @@ export type FamilyMember = {
   id: string;
   name: string;
   relation: Relation;
+  /** Older members may still have an email; new members are added with an address instead. */
   email: string | null;
   phone: string | null;
+  /** Street address as typed, shown on the member card. */
+  address: string | null;
+  /** City the member lives in (an id from ASEAN_CITIES); their heat alerts use this city's readings. */
+  areaId: string | null;
   inviteCode: string;
   status: "invited" | "joined";
   lastCheckIn: string | null; // ISO time of the last "I'm safe" confirmation
   createdAt: string;
 };
 
-export type NewMember = Pick<FamilyMember, "name" | "relation" | "email" | "phone">;
+export type NewMember = Pick<FamilyMember, "name" | "relation" | "phone" | "address" | "areaId">;
 
 export function isVulnerable(m: Pick<FamilyMember, "relation">) {
   return VULNERABLE.includes(m.relation);
+}
+
+/** The city a member lives in, or `fallback` (the app's city) when no area was chosen. */
+export function memberArea(m: Pick<FamilyMember, "areaId">, fallback: City): City {
+  return (m.areaId && ASEAN_CITIES.find((c) => c.id === m.areaId)) || fallback;
 }
 
 export function makeInviteCode() {
@@ -72,6 +83,21 @@ export function reminderMessage(name: string, city: string, band?: string, t: TF
 }
 
 const digits = (phone: string) => phone.replace(/[^\d]/g, "");
+
+/** Opens the phone dialer for the number. False when this device can't place calls. */
+export async function callPhone(phone: string): Promise<boolean> {
+  try {
+    await Linking.openURL(`tel:${phone.replace(/[^\d+]/g, "")}`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** A family member's heat alert, ready to forward by WhatsApp or SMS. */
+export function forwardMessage(name: string, title: string, message: string, t: TFunction = en) {
+  return `${t("Hi {name}, a heat alert from UrbanHeat Watch:", { name })}\n\n${title}\n${message}\n\n${t("Please stay cool, drink water and let me know you're OK.")}`;
+}
 
 /**
  * Copies text. On web the synchronous textarea copy runs first because some browsers leave the async
@@ -149,6 +175,8 @@ type Row = {
   relation: Relation;
   email: string | null;
   phone: string | null;
+  address?: string | null;
+  area_id?: string | null;
   invite_code: string;
   status: "invited" | "joined";
   last_check_in: string | null;
@@ -161,6 +189,8 @@ const fromRow = (r: Row): FamilyMember => ({
   relation: r.relation,
   email: r.email,
   phone: r.phone,
+  address: r.address ?? null,
+  areaId: r.area_id ?? null,
   inviteCode: r.invite_code,
   status: r.status,
   lastCheckIn: r.last_check_in,
@@ -184,7 +214,14 @@ function localStore(userId: string | null): FamilyStore {
   const read = async (): Promise<FamilyMember[]> => {
     try {
       const raw = await AsyncStorage.getItem(key);
-      return raw ? (JSON.parse(raw) as FamilyMember[]) : [];
+      // Members saved before addresses existed have no address/area fields.
+      return raw
+        ? (JSON.parse(raw) as FamilyMember[]).map((m) => ({
+            ...m,
+            address: m.address ?? null,
+            areaId: m.areaId ?? null,
+          }))
+        : [];
     } catch {
       return [];
     }
@@ -196,6 +233,7 @@ function localStore(userId: string | null): FamilyStore {
     async add(m) {
       const member: FamilyMember = {
         ...m,
+        email: null,
         id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         inviteCode: makeInviteCode(),
         status: "invited",
@@ -223,13 +261,21 @@ function cloudStore(): FamilyStore {
       return (data as Row[]).map(fromRow);
     },
     async add(m) {
-      const { data, error } = await supabase
+      const base = { name: m.name, relation: m.relation, phone: m.phone, invite_code: makeInviteCode() };
+      let res = await supabase
         .from("family_members")
-        .insert({ name: m.name, relation: m.relation, email: m.email, phone: m.phone, invite_code: makeInviteCode() })
+        .insert({ ...base, address: m.address, area_id: m.areaId })
         .select()
         .single();
-      if (error) throw error;
-      return fromRow(data as Row);
+      // A table created before addresses existed lacks those columns (PGRST204): save the rest
+      // and keep the address on the member object until supabase/schema.sql is re-run.
+      if (res.error?.code === "PGRST204") {
+        res = await supabase.from("family_members").insert(base).select().single();
+        if (res.error) throw res.error;
+        return { ...fromRow(res.data as Row), address: m.address, areaId: m.areaId };
+      }
+      if (res.error) throw res.error;
+      return fromRow(res.data as Row);
     },
     async update(id, patch) {
       const { error } = await supabase

@@ -130,12 +130,21 @@ create table if not exists public.family_members (
   relation       text not null default 'Other',
   email          text check (email is null or char_length(email) <= 254),
   phone          text check (phone is null or char_length(phone) <= 32),
+  address        text check (address is null or char_length(address) <= 200),
+  area_id        text check (area_id is null or char_length(area_id) <= 16),
   invite_code    text not null unique check (char_length(invite_code) between 6 and 16),
   status         text not null default 'invited' check (status in ('invited', 'joined')),
   joined_user_id uuid references auth.users (id) on delete set null,
   last_check_in  timestamptz,
   created_at     timestamptz not null default now()
 );
+
+-- Address and home city (an app city id) of each member, for their local heat alerts.
+-- Safe to re-run on a table created before these columns existed.
+alter table public.family_members add column if not exists address text
+  check (address is null or char_length(address) <= 200);
+alter table public.family_members add column if not exists area_id text
+  check (area_id is null or char_length(area_id) <= 16);
 
 create index if not exists family_members_owner_idx on public.family_members (owner_id, created_at);
 
