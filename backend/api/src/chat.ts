@@ -125,7 +125,7 @@ export async function streamChat(
       };
       let firstToken: NodeJS.Timeout | undefined = setTimeout(
         () => upstream.abort(new Error("no content")),
-        deps.firstTokenTimeoutMs ?? 20_000,
+        deps.firstTokenTimeoutMs ?? 12_000,
       );
 
       try {

@@ -44,7 +44,7 @@ import { useCity } from '../components/CityContext';
 import AiMascot, { AiAvatar } from '../components/ai/AiMascot';
 import LanguageButton from '../components/LanguagePicker';
 import PressableScale from '../components/ui/PressableScale';
-import { useI18n, type TFunction } from '../lib/i18n';
+import { tx, useI18n, type TFunction } from '../lib/i18n';
 import { C, F, R, shadow } from '../components/ui/theme';
 
 type IconName = keyof typeof Ionicons.glyphMap;
@@ -122,6 +122,26 @@ function ShimmerText({ children }: { children: string }) {
   return <Animated.Text style={[styles.thinkingText, style]}>{children}</Animated.Text>;
 }
 
+/** Waiting text that moves on while the free models queue, so a slow answer never looks frozen. */
+const PENDING_STEPS: { after: number; text: string }[] = [
+  { after: 0, text: tx('Researching your question…') },
+  { after: 5, text: tx('Writing your answer…') },
+  { after: 12, text: tx('The free AI is busy. Trying a backup model…') },
+  { after: 25, text: tx('Almost there. Thanks for waiting…') },
+];
+
+function PendingText() {
+  const { t } = useI18n();
+  const [seconds, setSeconds] = useState(0);
+  useEffect(() => {
+    const start = Date.now();
+    const timer = setInterval(() => setSeconds(Math.floor((Date.now() - start) / 1000)), 1000);
+    return () => clearInterval(timer);
+  }, []);
+  const step = [...PENDING_STEPS].reverse().find((s) => seconds >= s.after)!;
+  return <ShimmerText>{t(step.text)}</ShimmerText>;
+}
+
 export default function AIScreen() {
   const params = useLocalSearchParams<{ query?: string }>();
   const { user, isGuest } = useAuth();
@@ -130,7 +150,9 @@ export default function AIScreen() {
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
-  const [inputHeight, setInputHeight] = useState(22);
+  // Web only: the textarea's height, padding included (one 22px line + 18px padding = 40).
+  const [inputHeight, setInputHeight] = useState(INPUT_MIN_H);
+  const inputRef = useRef<TextInput>(null);
   const [focused, setFocused] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(!!user);
   const [pending, setPending] = useState(false);
@@ -153,6 +175,42 @@ export default function AIScreen() {
   // Only a confirmed "not configured" disables input; when offline the user can still retry.
   const configured = aiStatus !== 'not_configured';
   const suggestions = buildSuggestions(city.name, city.country, t);
+  const placeholder = configured ? t('Ask about heat, hydration, safety…') : t('AI is not configured');
+
+  // Web: size the textarea from its real scrollHeight whenever its text, placeholder or busy state
+  // changes, when fonts finish loading and when the screen width changes. React Native Web's
+  // onContentSizeChange reported one line for an emptied box, cutting off a two-line placeholder.
+  useEffect(() => {
+    if (Platform.OS !== 'web') return;
+    const el = inputRef.current as unknown as HTMLTextAreaElement | null;
+    if (!el || typeof el.scrollHeight !== 'number') return;
+    let width = -1;
+    let live = true;
+    const measure = () => {
+      if (!live) return;
+      // Shrink to one line first: scrollHeight then covers the text or placeholder (with padding).
+      // ('auto' would fall back to the textarea's default two rows.)
+      const prev = el.style.height;
+      el.style.height = `${INPUT_MIN_H}px`;
+      const h = el.scrollHeight;
+      el.style.height = prev;
+      setInputHeight(Math.min(INPUT_MAX_H, Math.max(INPUT_MIN_H, h)));
+    };
+    Promise.resolve().then(measure);
+    document.fonts?.ready.then(measure).catch(() => {});
+    // The box gets its final width only after layout; re-measure whenever its width changes.
+    const ro = new ResizeObserver(() => {
+      if (el.clientWidth !== width) {
+        width = el.clientWidth;
+        measure();
+      }
+    });
+    ro.observe(el);
+    return () => {
+      live = false;
+      ro.disconnect();
+    };
+  }, [input, placeholder, busy]);
 
   const scrollToEnd = useCallback((animated = true) => {
     requestAnimationFrame(() => scrollRef.current?.scrollToEnd({ animated }));
@@ -509,7 +567,7 @@ export default function AIScreen() {
               <AiAvatar size={30} mood="thinking" />
               <View style={[styles.assistantBubble, styles.thinkingBubble]}>
                 <ThinkingDots />
-                <ShimmerText>{t('Researching your question…')}</ShimmerText>
+                <PendingText />
               </View>
             </Animated.View>
           )}
@@ -536,16 +594,16 @@ export default function AIScreen() {
         <View style={styles.composerWrap}>
           <View style={[styles.composer, focused && styles.composerFocused, !configured && styles.composerDisabled]}>
             <TextInput
+              ref={inputRef}
               value={input}
               onChangeText={setInput}
-              placeholder={configured ? t('Ask about heat, hydration, safety…') : t('AI is not configured')}
+              placeholder={placeholder}
               placeholderTextColor={C.inkMuted}
               editable={configured}
               multiline
               onFocus={() => setFocused(true)}
               onBlur={() => setFocused(false)}
               onKeyPress={handleKeyPress}
-              onContentSizeChange={(e) => setInputHeight(Math.min(120, Math.max(22, e.nativeEvent.contentSize.height)))}
               style={[
                 styles.input,
                 // A long placeholder (e.g. in Hindi) must not show a scrollbar; typed text can scroll.
@@ -586,6 +644,8 @@ export default function AIScreen() {
 }
 
 const webInput = Platform.OS === 'web' ? ({ outlineStyle: 'none', resize: 'none' } as object) : null;
+const INPUT_MIN_H = 40;
+const INPUT_MAX_H = 140;
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: C.bg },
@@ -754,8 +814,8 @@ const styles = StyleSheet.create({
   composerDisabled: { opacity: 0.6 },
   input: {
     flex: 1,
-    minHeight: 22,
-    maxHeight: 120,
+    minHeight: INPUT_MIN_H,
+    maxHeight: INPUT_MAX_H,
     fontSize: 15,
     fontFamily: F.body,
     lineHeight: 22,

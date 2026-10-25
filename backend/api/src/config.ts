@@ -51,7 +51,8 @@ export function loadConfig(): Config {
     rateLimitPerMinute: num("RATE_LIMIT_PER_MINUTE", 120),
     aiRateLimitPerMinute: num("AI_RATE_LIMIT_PER_MINUTE", 10),
     aiStreamIdleTimeoutMs: num("OPENROUTER_STREAM_IDLE_TIMEOUT_MS", 60_000),
-    aiFirstTokenTimeoutMs: num("OPENROUTER_FIRST_TOKEN_TIMEOUT_MS", 20_000),
+    // Free models usually start answering in ~8 s; a tier silent for 12 s is queued, so fail over sooner.
+    aiFirstTokenTimeoutMs: num("OPENROUTER_FIRST_TOKEN_TIMEOUT_MS", 12_000),
     supabaseUrl: str("SUPABASE_URL"),
     supabaseServiceKey: str("SUPABASE_SERVICE_ROLE_KEY"),
     signupRateLimitPerHour: num("SIGNUP_RATE_LIMIT_PER_HOUR", 20),
